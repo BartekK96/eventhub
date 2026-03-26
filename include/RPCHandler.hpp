@@ -37,8 +37,7 @@ private:
   static void _handleDelete(HandlerContext& hCtx, jsonrpcpp::request_ptr req);
   static void _handlePing(HandlerContext& hCtx, jsonrpcpp::request_ptr req);
   static void _handleDisconnect(HandlerContext& hCtx, jsonrpcpp::request_ptr req);
-  static void _handleGetViewers(HandlerContext& hCtx, jsonrpcpp::request_ptr req);
-  static void _updateInstanceViewerCount(HandlerContext& hCtx, const std::string& topicName);
+  static void _handleGetSubscriberCount(HandlerContext& hCtx, jsonrpcpp::request_ptr req);
 };
 
 } // namespace eventhub

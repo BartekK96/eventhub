@@ -231,25 +231,6 @@ void Worker::_workerMain() {
       },
       true);
 
-  // Periodically refresh viewer counts in Redis and push to viewers-internal topics.
-  _ev->addTimer(30000, [this](TimerCtx* ctx) {
-    auto workerKey = fmt::format("{}-{}", _server->getInstanceId(), getWorkerId());
-    for (const auto& topic : _topic_manager->getTopicsWithSubscribers()) {
-      auto lastSlash = topic.rfind('/');
-      if (lastSlash == std::string::npos) continue;
-      try {
-        auto count = _topic_manager->getSubscriberCountForTopic(topic);
-        auto& redis = _server->getRedis();
-        redis.setInstanceViewerCount(topic, workerKey, count);
-        auto total = redis.getAggregatedViewerCount(topic);
-        nlohmann::json j;
-        j["topic"]   = topic;
-        j["viewers"] = total;
-        redis.publishMessage(topic.substr(0, lastSlash) + "/viewers-internal", "0", j.dump());
-      } catch (...) {}
-    }
-  }, true);
-
   if (_epoll_fd == -1) {
     LOG->critical("epoll_create1() failed in worker {}: {}.", getWorkerId(), strerror(errno));
     exit(1);

@@ -61,22 +61,6 @@ void TopicManager::deleteTopic(const std::string& topicFilter) {
 }
 
 /*
-* Return all topic names that currently have at least one subscriber.
-*/
-std::vector<std::string> TopicManager::getTopicsWithSubscribers() {
-  std::lock_guard<std::mutex> lock(_topic_list_lock);
-  std::vector<std::string> topics;
-
-  for (auto& entry : _topic_list) {
-    if (entry.second->getSubscriberCount() > 0) {
-      topics.push_back(entry.first);
-    }
-  }
-
-  return topics;
-}
-
-/*
 * Count subscribers for a specific topic across all matching topic entries.
 * Counts both exact matches and filter entries that match the given topic.
 * @param topicName exact topic name to count subscribers for.

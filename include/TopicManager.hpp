@@ -5,7 +5,6 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
-#include <vector>
 
 #include "Forward.hpp"
 #include "Common.hpp"
@@ -23,7 +22,6 @@ public:
   void publish(const std::string& topicName, const std::string& data);
   void deleteTopic(const std::string& topicFilter);
   std::size_t getSubscriberCountForTopic(const std::string& topicFilter);
-  std::vector<std::string> getTopicsWithSubscribers();
 
   static bool isValidTopic(const std::string& topicName);
   static bool isValidTopicFilter(const std::string& filterName);

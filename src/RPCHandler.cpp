@@ -2,11 +2,13 @@
 #include <spdlog/logger.h>
 #include <sstream>
 #include <string>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <initializer_list>
 #include <memory>
 #include <cmath>
+#include <thread>
 #include <vector>
 
 #include "RPCHandler.hpp"
@@ -44,7 +46,7 @@ RPCMethod RPCHandler::getHandler(const std::string& methodName) {
       {"del", _handleDelete},
       {"ping", _handlePing},
       {"disconnect", _handleDisconnect},
-      {"getviewers", _handleGetViewers}};
+      {"getsubscribercount", _handleGetSubscriberCount}};
 
   std::string methodNameLC = methodName;
   Util::strToLower(methodNameLC);
@@ -180,9 +182,6 @@ void RPCHandler::_handleSubscribe(HandlerContext& ctx, jsonrpcpp::request_ptr re
 
   _sendSuccessResponse(ctx, req, result);
 
-  // Publish updated viewer count for this topic.
-  _updateInstanceViewerCount(ctx, topicName);
-
   // Send cached events if requested.
   _sendCacheToClient(ctx, req, topicName);
 }
@@ -218,10 +217,6 @@ void RPCHandler::_handleUnsubscribe(HandlerContext& ctx, jsonrpcpp::request_ptr 
   result["unsubscribe_count"] = count;
 
   _sendSuccessResponse(ctx, req, result);
-
-  for (const auto& topic : unsubscribedTopics) {
-    _updateInstanceViewerCount(ctx, topic);
-  }
 }
 
 /**
@@ -237,10 +232,6 @@ void RPCHandler::_handleUnsubscribeAll(HandlerContext& ctx, jsonrpcpp::request_p
   result["unsubscribe_count"] = ctx.connection()->unsubscribeAll();
 
   _sendSuccessResponse(ctx, req, result);
-
-  for (const auto& topic : subscriptions) {
-    _updateInstanceViewerCount(ctx, topic);
-  }
 }
 
 /**
@@ -552,40 +543,13 @@ void RPCHandler::_handlePing(HandlerContext& ctx, jsonrpcpp::request_ptr req) {
 }
 
 /**
- * Update this instance's subscriber count for a topic in Redis so that
- * getviewers requests from any instance return an up-to-date aggregated total.
- *
- * @param ctx Handler context.
- * @param topicName The topic that was subscribed/unsubscribed.
- */
-void RPCHandler::_updateInstanceViewerCount(HandlerContext& ctx, const std::string& topicName) {
-  auto lastSlash = topicName.rfind('/');
-  if (lastSlash == std::string::npos) return;
-
-  try {
-    auto count     = ctx.worker()->getTopicManager()->getSubscriberCountForTopic(topicName);
-    auto workerKey = fmt::format("{}-{}", ctx.server()->getInstanceId(), ctx.worker()->getWorkerId());
-    auto& redis    = ctx.server()->getRedis();
-
-    redis.setInstanceViewerCount(topicName, workerKey, count);
-    auto total = redis.getAggregatedViewerCount(topicName);
-
-    nlohmann::json j;
-    j["topic"]   = topicName;
-    j["viewers"] = total;
-    redis.publishMessage(topicName.substr(0, lastSlash) + "/viewers-internal", "0", j.dump());
-  } catch (std::exception& e) {
-    LOG->error("Error updating instance viewer count for {}: {}", topicName, e.what());
-  }
-}
-
-/**
- * Handle getviewers RPC command.
- * Return the aggregated viewer count across all instances for a given topic.
+ * Handle getsubscribercount RPC command.
+ * Broadcast a request to all eventhub instances via Redis pub/sub,
+ * collect responses for 50ms, and return the aggregated subscriber count.
  * @param ctx Client issuing request.
  * @param req RPC request.
  */
-void RPCHandler::_handleGetViewers(HandlerContext& ctx, jsonrpcpp::request_ptr req) {
+void RPCHandler::_handleGetSubscriberCount(HandlerContext& ctx, jsonrpcpp::request_ptr req) {
   auto params = req->params();
   std::string topicName;
 
@@ -597,7 +561,7 @@ void RPCHandler::_handleGetViewers(HandlerContext& ctx, jsonrpcpp::request_ptr r
     return _sendInvalidParamsError(ctx, req, "You must specify 'topic'.");
   }
 
-  if (!TopicManager::isValidTopic(topicName)) {
+  if (!TopicManager::isValidTopicOrFilter(topicName)) {
     return _sendInvalidParamsError(ctx, req, fmt::format("Invalid topic: {}", topicName));
   }
 
@@ -606,14 +570,30 @@ void RPCHandler::_handleGetViewers(HandlerContext& ctx, jsonrpcpp::request_ptr r
   }
 
   try {
-    auto viewers = ctx.server()->getRedis().getAggregatedViewerCount(topicName);
+    auto* server = ctx.server();
+    const auto correlationId = fmt::format("{}-{}", server->getInstanceId(), Util::getTimeSinceEpoch());
+    auto waiter = server->registerSubscriberCountWaiter(correlationId);
+
+    // Broadcast request to all instances: "correlationId:topic"
+    server->getRedis().publishRaw("$sub_count_req$", fmt::format("{}:{}", correlationId, topicName));
+
+    // Wait 50ms for responses to arrive via the Redis subscriber thread.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    std::size_t total;
+    {
+      std::lock_guard<std::mutex> lock(waiter->mtx);
+      total = waiter->total;
+    }
+    server->removeSubscriberCountWaiter(correlationId);
+
     _sendSuccessResponse(ctx, req, {
-      {"topic",   topicName},
-      {"viewers", viewers}
+      {"topic",            topicName},
+      {"subscriber_count", total}
     });
   } catch (std::exception& e) {
-    LOG->error("Error getting viewer count for {}: {}", topicName, e.what());
-    _sendInvalidParamsError(ctx, req, fmt::format("Error retrieving viewer count: {}", e.what()));
+    LOG->error("Error getting subscriber count for {}: {}", topicName, e.what());
+    _sendInvalidParamsError(ctx, req, fmt::format("Error retrieving subscriber count: {}", e.what()));
   }
 }
 

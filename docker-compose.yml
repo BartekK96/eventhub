@@ -7,6 +7,7 @@ services:
       - disable_auth=1
       - enable_sse=1
       - redis_host=redis
+      - log_level=debug
     ports:
       - "8080:8080"
     depends_on:

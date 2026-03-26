@@ -433,44 +433,10 @@ void Redis::incrementLimitCount(const std::string& topic, const std::string& sub
   }
 }
 
-// Store the viewer count for this instance for a given topic in Redis.
-// Uses a HSET keyed by instanceId with value "count:timestamp_ms".
-// The whole hash has a 120s TTL so stale instances auto-expire.
-void Redis::setInstanceViewerCount(const std::string& topic, const std::string& instanceId, std::size_t count) {
-  auto key = REDIS_VIEWER_COUNT_PATH(topic);
-  auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-    std::chrono::system_clock::now().time_since_epoch()).count();
-  _redisInstance->hset(key, instanceId, fmt::format("{}:{}", count, now_ms));
-  _redisInstance->expire(key, 120);
-}
-
-// Read all instance viewer counts from Redis and aggregate them.
-// Skips entries older than 90 seconds (stale instances).
-std::size_t Redis::getAggregatedViewerCount(const std::string& topic) {
-  auto key = REDIS_VIEWER_COUNT_PATH(topic);
-  std::unordered_map<std::string, std::string> fields;
-  _redisInstance->hgetall(key, std::inserter(fields, fields.begin()));
-
-  auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-    std::chrono::system_clock::now().time_since_epoch()).count();
-  const long long stale_threshold_ms = 90000;
-
-  std::size_t total = 0;
-  for (auto& kv : fields) {
-    auto colon = kv.second.find(':');
-    if (colon == std::string::npos) continue;
-    try {
-      auto count = std::stoull(kv.second.substr(0, colon));
-      auto ts    = std::stoll(kv.second.substr(colon + 1));
-      if ((now_ms - ts) <= stale_threshold_ms) {
-        total += count;
-      }
-    } catch (...) {
-      continue;
-    }
-  }
-
-  return total;
+// Publish a raw message to a Redis channel without any JSON wrapping.
+// Used for internal eventhub communication channels.
+void Redis::publishRaw(const std::string& channel, const std::string& message) {
+  _redisInstance->publish(REDIS_PREFIX(channel), message);
 }
 
 CacheItemMeta::CacheItemMeta(const std::string& id, unsigned long expireAt, const std::string& origin) :
