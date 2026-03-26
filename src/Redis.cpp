@@ -433,6 +433,12 @@ void Redis::incrementLimitCount(const std::string& topic, const std::string& sub
   }
 }
 
+// Publish a raw message to a Redis channel without any JSON wrapping.
+// Used for internal eventhub communication channels.
+void Redis::publishRaw(const std::string& channel, const std::string& message) {
+  _redisInstance->publish(REDIS_PREFIX(channel), message);
+}
+
 CacheItemMeta::CacheItemMeta(const std::string& id, unsigned long expireAt, const std::string& origin) :
   _id(id), _expireAt(expireAt), _origin(origin) {}
 

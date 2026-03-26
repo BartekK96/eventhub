@@ -61,6 +61,25 @@ void TopicManager::deleteTopic(const std::string& topicFilter) {
 }
 
 /*
+* Count subscribers for a specific topic across all matching topic entries.
+* Counts both exact matches and filter entries that match the given topic.
+* @param topicName exact topic name to count subscribers for.
+* @returns total subscriber count.
+*/
+std::size_t TopicManager::getSubscriberCountForTopic(const std::string& topicName) {
+  std::lock_guard<std::mutex> lock(_topic_list_lock);
+  std::size_t count = 0;
+
+  for (auto& entry : _topic_list) {
+    if (entry.first == topicName || isFilterMatched(entry.first, topicName)) {
+      count += entry.second->getSubscriberCount();
+    }
+  }
+
+  return count;
+}
+
+/*
 * Check if a topic name is valid.
 * Rules: Cannot be empty, start or end with '/', and only contain [a-zA-Z0-9-_].
 * @param topicName topic name to validate.

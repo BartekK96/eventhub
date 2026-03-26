@@ -65,6 +65,7 @@ public:
 
   bool isRateLimited(const std::string& topic, const std::string& subject, unsigned long max);
   void incrementLimitCount(const std::string& topic, const std::string& subject, unsigned long interval);
+  void publishRaw(const std::string& channel, const std::string& message);
 
 private:
   std::shared_ptr<sw::redis::Redis> _redisInstance;

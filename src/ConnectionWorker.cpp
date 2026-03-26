@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <string.h>
+#include <fmt/format.h>
 #include <spdlog/logger.h>
 
 #include "ConnectionWorker.hpp"
@@ -24,6 +25,7 @@
 
 #include "Common.hpp"
 #include "Config.hpp"
+#include "jwt/json/json.hpp"
 #include "Connection.hpp"
 #include "EventLoop.hpp"
 #include "HandlerContext.hpp"

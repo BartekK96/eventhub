@@ -3,9 +3,11 @@
 #include <openssl/ssl.h>
 #include <assert.h>
 #include <openssl/ossl_typ.h>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 
 #include "Forward.hpp"
 #include "KVStore.hpp"
@@ -16,6 +18,11 @@
 
 namespace eventhub {
 
+struct SubscriberCountWaiter {
+  std::mutex mtx;
+  std::size_t total = 0;
+};
+
 class Server final {
 public:
   Server(Config& cfg);
@@ -25,10 +32,14 @@ public:
   void stop();
   void reload();
   Config& config() { return _config; }
+  const std::string& getInstanceId() const { return _instance_id; }
   int getServerSocket() { return _server_socket; };
   Worker* getWorker();
   void publish(const std::string& topicName, const std::string& data);
   Redis& getRedis() { return _redis; }
+  std::shared_ptr<SubscriberCountWaiter> registerSubscriberCountWaiter(const std::string& correlationId);
+  void notifySubscriberCountWaiter(const std::string& correlationId, std::size_t count);
+  void removeSubscriberCountWaiter(const std::string& correlationId);
   KVStore* getKVStore() { return _kv_store.get(); }
   metrics::AggregatedMetrics getAggregatedMetrics();
 
@@ -42,7 +53,10 @@ public:
 
 private:
   Config& _config;
+  std::string _instance_id;
   int _server_socket;
+  std::unordered_map<std::string, std::shared_ptr<SubscriberCountWaiter>> _subscriber_count_waiters;
+  std::mutex _subscriber_count_waiters_mtx;
   int _server_socket_ssl;
   bool _ssl_enabled;
   SSL_CTX* _ssl_ctx;

@@ -33,6 +33,7 @@
 #include "metrics/Types.hpp"
 #include "ConnectionWorker.hpp"
 #include "KVStore.hpp"
+#include "TopicManager.hpp"
 #include "Logger.hpp"
 
 namespace eventhub {
@@ -45,7 +46,12 @@ std::size_t alpn_protocol_length   = 8;
 
 Server::Server(Config& cfg)
     : _config(cfg), _server_socket(-1), _server_socket_ssl(-1), _ssl_enabled(false), _ssl_ctx(nullptr), _redis(cfg) {
-
+  char hostname[256];
+  if (gethostname(hostname, sizeof(hostname)) == 0) {
+    _instance_id = fmt::format("{}-{}", hostname, getpid());
+  } else {
+    _instance_id = fmt::format("unknown-{}", getpid());
+  }
 }
 
 Server::~Server() {
@@ -108,18 +114,50 @@ void Server::start() {
   _metrics.worker_count          = numWorkerThreads;
   _metrics.server_start_unixtime = Util::getTimeSinceEpoch();
 
+  const std::string subCountReqChannel  = "$sub_count_req$";
+  const std::string subCountRespPrefix  = "$sub_count_resp$:";
+
   RedisMsgCallback cb = [&](const std::string& pattern, const std::string& topic, const std::string& msg) {
     // Calculate publish delay.
     if (topic == "$metrics$/system_unixtime") {
       try {
         auto j  = nlohmann::json::parse(msg);
         auto ts = stol(static_cast<std::string>(j["message"]), nullptr, 10);
-        ;
         auto diff                       = Util::getTimeSinceEpoch() - ts;
         _metrics.redis_publish_delay_ms = (diff < 0) ? 0 : diff;
         return;
       } catch (...) {}
 
+      return;
+    }
+
+    // Handle subscriber count request — read local count and publish response.
+    if (topic == subCountReqChannel) {
+      auto colonPos = msg.find(':');
+      if (colonPos == std::string::npos) return;
+      auto correlationId   = msg.substr(0, colonPos);
+      auto requestedTopic  = msg.substr(colonPos + 1);
+
+      std::size_t total = 0;
+      {
+        std::lock_guard<std::mutex> lock(_connection_workers_lock);
+        for (auto& worker : _connection_workers.getWorkerList()) {
+          total += worker->getTopicManager()->getSubscriberCountForTopic(requestedTopic);
+        }
+      }
+
+      LOG->debug("sub_count_req received: correlationId={} topic={} local_count={}", correlationId, requestedTopic, total);
+      _redis.publishRaw(subCountRespPrefix + correlationId, std::to_string(total));
+      return;
+    }
+
+    // Handle subscriber count response — notify the waiting RPC handler.
+    if (topic.rfind(subCountRespPrefix, 0) == 0) {
+      auto correlationId = topic.substr(subCountRespPrefix.length());
+      LOG->debug("sub_count_resp received: correlationId={} count={}", correlationId, msg);
+      try {
+        notifySubscriberCountWaiter(correlationId, std::stoull(msg));
+      } catch (...) {}
       return;
     }
 
@@ -444,6 +482,30 @@ metrics::AggregatedMetrics Server::getAggregatedMetrics() {
   m.eventloop_delay_ms = (m.eventloop_delay_ms / _connection_workers.getWorkerList().size());
 
   return m;
+}
+
+std::shared_ptr<SubscriberCountWaiter> Server::registerSubscriberCountWaiter(const std::string& correlationId) {
+  auto waiter = std::make_shared<SubscriberCountWaiter>();
+  std::lock_guard<std::mutex> lock(_subscriber_count_waiters_mtx);
+  _subscriber_count_waiters[correlationId] = waiter;
+  return waiter;
+}
+
+void Server::notifySubscriberCountWaiter(const std::string& correlationId, std::size_t count) {
+  std::shared_ptr<SubscriberCountWaiter> waiter;
+  {
+    std::lock_guard<std::mutex> lock(_subscriber_count_waiters_mtx);
+    auto it = _subscriber_count_waiters.find(correlationId);
+    if (it == _subscriber_count_waiters.end()) return;
+    waiter = it->second;
+  }
+  std::lock_guard<std::mutex> wLock(waiter->mtx);
+  waiter->total += count;
+}
+
+void Server::removeSubscriberCountWaiter(const std::string& correlationId) {
+  std::lock_guard<std::mutex> lock(_subscriber_count_waiters_mtx);
+  _subscriber_count_waiters.erase(correlationId);
 }
 
 } // namespace eventhub

@@ -2,15 +2,19 @@
 #include <spdlog/logger.h>
 #include <sstream>
 #include <string>
+#include <chrono>
 #include <cstdint>
 #include <exception>
 #include <initializer_list>
 #include <memory>
 #include <cmath>
+#include <thread>
+#include <vector>
 
 #include "RPCHandler.hpp"
 #include "Config.hpp"
 #include "Connection.hpp"
+#include "ConnectionWorker.hpp"
 #include "HandlerContext.hpp"
 #include "Redis.hpp"
 #include "Server.hpp"
@@ -41,7 +45,8 @@ RPCMethod RPCHandler::getHandler(const std::string& methodName) {
       {"set", _handleSet},
       {"del", _handleDelete},
       {"ping", _handlePing},
-      {"disconnect", _handleDisconnect}};
+      {"disconnect", _handleDisconnect},
+      {"getsubscribercount", _handleGetSubscriberCount}};
 
   std::string methodNameLC = methodName;
   Util::strToLower(methodNameLC);
@@ -196,6 +201,7 @@ void RPCHandler::_handleUnsubscribe(HandlerContext& ctx, jsonrpcpp::request_ptr 
 
   auto topics        = req->params().to_json();
   std::size_t count = 0;
+  std::vector<std::string> unsubscribedTopics;
   for (auto topic : topics) {
     if (!TopicManager::isValidTopicOrFilter(topic) || !accessController->allowSubscribe(topic)) {
       continue;
@@ -203,6 +209,7 @@ void RPCHandler::_handleUnsubscribe(HandlerContext& ctx, jsonrpcpp::request_ptr 
 
     if (ctx.connection()->unsubscribe(topic)) {
       count++;
+      unsubscribedTopics.push_back(topic);
     }
   }
 
@@ -219,6 +226,8 @@ void RPCHandler::_handleUnsubscribe(HandlerContext& ctx, jsonrpcpp::request_ptr 
  * @param req RPC request.
  */
 void RPCHandler::_handleUnsubscribeAll(HandlerContext& ctx, jsonrpcpp::request_ptr req) {
+  auto subscriptions = ctx.connection()->listSubscriptions();
+
   nlohmann::json result;
   result["unsubscribe_count"] = ctx.connection()->unsubscribeAll();
 
@@ -531,6 +540,61 @@ void RPCHandler::_handlePing(HandlerContext& ctx, jsonrpcpp::request_ptr req) {
   result["pong"] = Util::getTimeSinceEpoch();
 
   _sendSuccessResponse(ctx, req, result);
+}
+
+/**
+ * Handle getsubscribercount RPC command.
+ * Broadcast a request to all eventhub instances via Redis pub/sub,
+ * collect responses for 50ms, and return the aggregated subscriber count.
+ * @param ctx Client issuing request.
+ * @param req RPC request.
+ */
+void RPCHandler::_handleGetSubscriberCount(HandlerContext& ctx, jsonrpcpp::request_ptr req) {
+  auto params = req->params();
+  std::string topicName;
+
+  try {
+    topicName = params.get("topic").get<std::string>();
+  } catch (...) {}
+
+  if (topicName.empty()) {
+    return _sendInvalidParamsError(ctx, req, "You must specify 'topic'.");
+  }
+
+  if (!TopicManager::isValidTopicOrFilter(topicName)) {
+    return _sendInvalidParamsError(ctx, req, fmt::format("Invalid topic: {}", topicName));
+  }
+
+  if (!ctx.connection()->getAccessController()->allowSubscribe(topicName)) {
+    return _sendInvalidParamsError(ctx, req, fmt::format("You are not allowed to read topic: {}", topicName));
+  }
+
+  try {
+    auto* server = ctx.server();
+    const auto correlationId = fmt::format("{}-{}", server->getInstanceId(), Util::getTimeSinceEpoch());
+    auto waiter = server->registerSubscriberCountWaiter(correlationId);
+
+    // Broadcast request to all instances: "correlationId:topic"
+    server->getRedis().publishRaw("$sub_count_req$", fmt::format("{}:{}", correlationId, topicName));
+
+    // Wait 50ms for responses to arrive via the Redis subscriber thread.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    std::size_t total;
+    {
+      std::lock_guard<std::mutex> lock(waiter->mtx);
+      total = waiter->total;
+    }
+    server->removeSubscriberCountWaiter(correlationId);
+
+    _sendSuccessResponse(ctx, req, {
+      {"topic",            topicName},
+      {"subscriber_count", total}
+    });
+  } catch (std::exception& e) {
+    LOG->error("Error getting subscriber count for {}: {}", topicName, e.what());
+    _sendInvalidParamsError(ctx, req, fmt::format("Error retrieving subscriber count: {}", e.what()));
+  }
 }
 
 /**
